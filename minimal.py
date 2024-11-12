@@ -5,14 +5,13 @@ author: Albert Alonso (2024)
 
 ===
 Some things are still missing to be implemented:
-    - Add checkpoint manager / saving weights.
-    - Add evaluation loop.
     - Add logging.
     - Add data augmentation and normalization.
     - Incorporate the PCA step into the model.
     - Add distributed training.
 """
 from typing import Sequence
+import pathlib
 
 from flax import linen as nn
 from flax import struct
@@ -22,8 +21,17 @@ import matplotlib.pyplot as plt
 import optax
 from tqdm import tqdm
 import pcax
+import numpy as np
+from numba import njit
+from flax.training import orbax_utils
+from flax.training.early_stopping import EarlyStopping
+import orbax.checkpoint
+import shutil
 
 from celegans import sim_pca, simulate, video_synthesis
+
+import matplotlib
+matplotlib.use("Agg")
 
 
 @struct.dataclass
@@ -56,6 +64,20 @@ class CElegansDataset:
         plt.title("Sample Synthetic Frame")
         plt.axis("off")
         plt.show()
+
+    def plot_predictions(self, key, predictions, outpath, step):
+        frames, labels = self.get_batch(key)
+        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+        ax.set_title(f"Predictions at step {step}")
+        ax.imshow(frames[0, frames.shape[1]//2], cmap="gray")
+        for label in labels[0]:
+            ax.plot(label[1, :, 0], label[1, :, 1], 'r')
+        for x in predictions[1]:
+            ax.plot(x[1, :, 0], x[1, :, 1])
+        ax.set_axis_off()
+        fig.tight_layout()
+        fig.savefig(outpath/f"predictions.png")
+        plt.close(fig)
 
     def generate_pca_data(self, key, n):
         return jax.jit(sim_pca, static_argnums=(1, 2))(key, n, self.num_points)
@@ -284,11 +306,48 @@ def calc_losses(predictions, labels, sigma=1.0, cutoff=1.0, size=256):
     return Loss_X, Loss_S, Loss_P
 
 
+@njit
+def non_max_suppression(predictions, threshold, overlap_threshold, cutoff):
+    s, x, p = predictions
+    n = len(x)
+
+    remaining_indices = np.arange(n)
+
+    valid = s > threshold
+    x, s, p = x[valid], s[valid], p[valid]
+    remaining_indices = remaining_indices[valid]
+    xcm = x[:, x.shape[1] // 2, x.shape[2] // 2, :]
+
+    sorted_idxs = np.flip(np.argsort(s))
+    xcm, p = xcm[sorted_idxs], p[sorted_idxs]
+    remaining_indices = remaining_indices[sorted_idxs]
+
+    threshold_p = -np.log(overlap_threshold)
+
+    def _suppress(x, p, i, cutoff, threshold):
+        mask = np.full(len(x), True)
+        visible = np.sum((x[i] - x) ** 2, -1) < cutoff**2
+        mask[visible] = np.sum((p[i] - p[visible]) ** 2, -1) >= threshold
+        mask[i] = True
+        return mask
+
+    for i in range(n):
+        idx = _suppress(xcm, p, i, cutoff, threshold_p)
+        xcm, p = xcm[idx], p[idx]
+        remaining_indices = remaining_indices[idx]
+        if i >= len(remaining_indices):
+            break
+
+    non_suppressed_mask = np.full(n, False)
+    non_suppressed_mask[remaining_indices] = True
+    return non_suppressed_mask
+
+
 if __name__ == "__main__":
     key = jax.random.key(42)
 
     dataset = CElegansDataset(
-        num_worms=50,
+        num_worms=10,
         num_points=49,
         num_frames=11,
         batch_size=8,
@@ -330,8 +389,47 @@ if __name__ == "__main__":
         params = optax.apply_updates(params, updates)
         return loss, params, opt_state, batch_stats, losses
 
-    for step in (bar := tqdm(range(int(1e4)), ncols=120)):
+    predict = jax.jit(lambda params, x: model.apply(params, x, is_training=False, A=A, B=B))
+
+    def evaluation_step(params, X, y):
+        variables = {"params": params, "batch_stats": batch_stats}
+        predictions = predict(variables, X)
+        predictions = jax.tree.map(lambda x: x[0], predictions)
+        predictions = jax.tree.map(np.asarray, predictions)
+        best_predictions_idxs = non_max_suppression(predictions, 0.5, 0.5, 48.0)
+        final_predictions = jax.tree.map(lambda x: x[best_predictions_idxs], predictions)
+        return final_predictions
+
+
+    ckpt_dir = pathlib.Path("checkpoints/")
+    shutil.rmtree(ckpt_dir, ignore_errors=True)
+    options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, save_interval_steps=2)
+    checkpointer = orbax.checkpoint.CheckpointManager(ckpt_dir.absolute(), options=options)
+    ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
+    save_args = orbax_utils.save_args_from_target(ckpt)
+
+    early_stop = EarlyStopping(patience=10, min_delta=1e-3)
+
+
+    for step in (bar := tqdm(range(int(1e8)), ncols=80)):
         data_key = jax.random.fold_in(key, step)
         X, y = get_batch(data_key)
         loss, params, opt_state, batch_stats, losses = train_step(params, X, y, opt_state, batch_stats)
-        bar.set_description(f"Loss: {loss:.2g}")
+        bar.set_description(f"Loss: {loss:.4g}")
+
+
+        if (step+1) % 1000 == 0:
+            ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
+            eval_key = jax.random.key(420)
+            checkpointer.save(step+1, args=orbax.checkpoint.args.StandardSave(ckpt))
+            eval_X, eval_y = get_batch(eval_key)
+            predictions = evaluation_step(params, eval_X, eval_y)
+            dataset.plot_predictions(eval_key, predictions, ckpt_dir, step+1)
+
+        early_stop = early_stop.update(loss)
+        if early_stop.should_stop:
+            ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
+            checkpointer.save(step+1, args=orbax.checkpoint.args.StandardSave(ckpt))
+            break
+
+

@@ -1,0 +1,10 @@
+numpy
+matplotlib
+jax[cuda12]
+tqdm
+pcax
+flax
+numba
+optax
+orbax-checkpoint
+
