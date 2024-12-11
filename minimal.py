@@ -65,7 +65,7 @@ class CElegansDataset:
         plt.axis("off")
         plt.show()
 
-    def plot_predictions(self, key, predictions, outpath, step):
+    def plot_predictions(self, key, predictions, outpath, step, title=''):
         frames, labels = self.get_batch(key)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
         ax.set_title(f"Predictions at step {step}")
@@ -76,7 +76,7 @@ class CElegansDataset:
             ax.plot(x[1, :, 0], x[1, :, 1])
         ax.set_axis_off()
         fig.tight_layout()
-        fig.savefig(outpath/f"predictions.png")
+        fig.savefig(outpath/f"predictions{title}.png")
         plt.close(fig)
 
     def generate_pca_data(self, key, n):
@@ -92,6 +92,7 @@ class Detector(nn.Module):
 
     @nn.compact
     def __call__(self, D, is_training, A, B):
+        D = D.transpose(0, 2, 3, 1)  # Shape: (batch, H, W, T)
         batch_size, height, width, _ = D.shape
         npoints = self.temporal_window * (self.n_components + 2) + 1
 
@@ -322,7 +323,7 @@ def non_max_suppression(predictions, threshold, overlap_threshold, cutoff):
     xcm, p = xcm[sorted_idxs], p[sorted_idxs]
     remaining_indices = remaining_indices[sorted_idxs]
 
-    threshold_p = -np.log(overlap_threshold)
+    threshold_p = -np.log(overlap_threshold+1e-6)
 
     def _suppress(x, p, i, cutoff, threshold):
         mask = np.full(len(x), True)
@@ -350,7 +351,7 @@ if __name__ == "__main__":
         num_worms=10,
         num_points=49,
         num_frames=11,
-        batch_size=8,
+        batch_size=32,
         box_size=256,
         video_size=256,
     )
@@ -363,13 +364,14 @@ if __name__ == "__main__":
     pca_data = dataset.generate_pca_data(key, 100_000)
     pca_state = pcax.fit(pca_data.reshape(len(pca_data), -1), 12)
     A = pca_state.components
+    A -= A.mean(1)[:, None]
     num_components, kpoints2 = A.shape
     J = jnp.flip(jnp.identity(kpoints2), axis=1)
     B = A @ J @ A.T
 
     variables = model.init(key, X, is_training=False, A=A, B=B)
     params, batch_stats = variables["params"], variables["batch_stats"]
-    optimizer = optax.adam(1e-3)
+    optimizer = optax.adam(3e-4)
     opt_state = optimizer.init(params)
 
     @jax.jit
@@ -380,7 +382,7 @@ if __name__ == "__main__":
                 variables, X, is_training=True, A=A, B=B, mutable="batch_stats"
             )
             (loss_x, loss_s, loss_p) = calc_losses(outs, y)
-            loss = 1e0 * loss_x + 1e2 * loss_s + 1e5 * loss_p
+            loss = 1e0 * loss_x + 1e2 * loss_s + 0 * loss_p
             losses = {'x': loss_x, 's': loss_s, 'p': loss_p}
             return loss, (updates["batch_stats"], losses)
 
@@ -389,14 +391,14 @@ if __name__ == "__main__":
         params = optax.apply_updates(params, updates)
         return loss, params, opt_state, batch_stats, losses
 
-    predict = jax.jit(lambda params, x: model.apply(params, x, is_training=False, A=A, B=B))
+    predict = jax.jit(lambda params, x: model.apply(params, x, is_training=False, A=A, B=B, mutable='batch_stats')[0])
 
-    def evaluation_step(params, X, y):
+    def evaluation_step(params, X, y, batch_stats, threshold=0.5):
         variables = {"params": params, "batch_stats": batch_stats}
         predictions = predict(variables, X)
         predictions = jax.tree.map(lambda x: x[0], predictions)
         predictions = jax.tree.map(np.asarray, predictions)
-        best_predictions_idxs = non_max_suppression(predictions, 0.5, 0.5, 48.0)
+        best_predictions_idxs = non_max_suppression(predictions, 0.5, threshold, 48.0)
         final_predictions = jax.tree.map(lambda x: x[best_predictions_idxs], predictions)
         return final_predictions
 
@@ -408,8 +410,7 @@ if __name__ == "__main__":
     ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
     save_args = orbax_utils.save_args_from_target(ckpt)
 
-    early_stop = EarlyStopping(patience=10, min_delta=1e-3)
-
+    early_stop = EarlyStopping(patience=1000, min_delta=1e-10)
 
     for step in (bar := tqdm(range(int(1e8)), ncols=80)):
         data_key = jax.random.fold_in(key, step)
@@ -417,19 +418,19 @@ if __name__ == "__main__":
         loss, params, opt_state, batch_stats, losses = train_step(params, X, y, opt_state, batch_stats)
         bar.set_description(f"Loss: {loss:.4g}")
 
-
-        if (step+1) % 1000 == 0:
+        if (step+1) % 500 == 0 or early_stop.should_stop:
             ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
             eval_key = jax.random.key(420)
             checkpointer.save(step+1, args=orbax.checkpoint.args.StandardSave(ckpt))
             eval_X, eval_y = get_batch(eval_key)
-            predictions = evaluation_step(params, eval_X, eval_y)
-            dataset.plot_predictions(eval_key, predictions, ckpt_dir, step+1)
+            predictions = evaluation_step(params, eval_X, eval_y, batch_stats, threshold=0.0)
+            dataset.plot_predictions(eval_key, predictions, ckpt_dir, step+1, title=f"_no_fingerprints")
+
+            if early_stop.should_stop:
+                break
 
         early_stop = early_stop.update(loss)
-        if early_stop.should_stop:
-            ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
-            checkpointer.save(step+1, args=orbax.checkpoint.args.StandardSave(ckpt))
-            break
+
+    checkpointer.wait_until_finished()
 
 
