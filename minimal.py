@@ -5,28 +5,29 @@ author: Albert Alonso (2024)
 
 ===
 Some things are still missing to be implemented:
-    - Add logging.
     - Add data augmentation and normalization.
     - Incorporate the PCA step into the model.
     - Add distributed training.
 """
 from typing import Sequence
 import pathlib
+import shutil
 
-from flax import linen as nn
-from flax import struct
+import matplotlib.pyplot as plt
+import numpy as np
+from tqdm import tqdm
+
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import optax
-from tqdm import tqdm
-import pcax
-import numpy as np
 from numba import njit
+from flax import linen as nn
+from flax import struct
 from flax.training import orbax_utils
 from flax.training.early_stopping import EarlyStopping
+from tensorboardX import SummaryWriter
 import orbax.checkpoint
-import shutil
+import pcax
 
 from celegans import sim_pca, simulate, video_synthesis
 
@@ -65,18 +66,19 @@ class CElegansDataset:
         plt.axis("off")
         plt.show()
 
-    def plot_predictions(self, key, predictions, outpath, step, title=''):
-        frames, labels = self.get_batch(key)
+    def plot_predictions(self, batch, predictions, step, writer=None):
+        frames, labels = batch
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-        ax.set_title(f"Predictions at step {step}")
         ax.imshow(frames[0, frames.shape[1]//2], cmap="gray")
         for label in labels[0]:
             ax.plot(label[1, :, 0], label[1, :, 1], 'r')
         for x in predictions[1]:
             ax.plot(x[1, :, 0], x[1, :, 1])
         ax.set_axis_off()
+        ax.margins(0.0)
         fig.tight_layout()
-        fig.savefig(outpath/f"predictions{title}.png")
+        if isinstance(writer, SummaryWriter):
+            writer.add_figure(f"predictions", fig, step)
         plt.close(fig)
 
     def generate_pca_data(self, key, n):
@@ -274,6 +276,7 @@ def calc_losses(predictions, labels, sigma=1.0, cutoff=1.0, size=256):
     # and perform L2 loss.
     scores = jnp.exp(-jnp.min(distances, axis=1) / sigma)
     Loss_S = jnp.mean((scores - S_pred) ** 2)
+    scores = jax.lax.stop_gradient(scores)
 
     # Find out which target is closests to each prediction.
     # ASSUMPTION: That is the one they are predicting.
@@ -382,8 +385,8 @@ if __name__ == "__main__":
                 variables, X, is_training=True, A=A, B=B, mutable="batch_stats"
             )
             (loss_x, loss_s, loss_p) = calc_losses(outs, y)
-            loss = 1e0 * loss_x + 1e2 * loss_s + 0 * loss_p
-            losses = {'x': loss_x, 's': loss_s, 'p': loss_p}
+            loss = 1e0 * loss_x + 1e1 * loss_s + 1e1 * loss_p
+            losses = {'positions': loss_x, 'score': loss_s, 'latent': loss_p}
             return loss, (updates["batch_stats"], losses)
 
         (loss, (batch_stats, losses)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
@@ -396,19 +399,21 @@ if __name__ == "__main__":
     def evaluation_step(params, X, y, batch_stats, threshold=0.5):
         variables = {"params": params, "batch_stats": batch_stats}
         predictions = predict(variables, X)
-        predictions = jax.tree.map(lambda x: x[0], predictions)
-        predictions = jax.tree.map(np.asarray, predictions)
+        predictions = jax.tree.map(lambda x: np.asarray(x[0]), predictions)
         best_predictions_idxs = non_max_suppression(predictions, 0.5, threshold, 48.0)
         final_predictions = jax.tree.map(lambda x: x[best_predictions_idxs], predictions)
         return final_predictions
 
 
     ckpt_dir = pathlib.Path("checkpoints/")
-    shutil.rmtree(ckpt_dir, ignore_errors=True)
+    shutil.rmtree(ckpt_dir, ignore_errors=False)
+    ckpt_dir.mkdir(exist_ok=False)
     options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=3, save_interval_steps=2)
     checkpointer = orbax.checkpoint.CheckpointManager(ckpt_dir.absolute(), options=options)
     ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
     save_args = orbax_utils.save_args_from_target(ckpt)
+    writer = SummaryWriter(ckpt_dir/"logs")
+    print('Logging started, use `tensorboard --logdir checkpoints` to view it.')
 
     early_stop = EarlyStopping(patience=1000, min_delta=1e-10)
 
@@ -417,14 +422,17 @@ if __name__ == "__main__":
         X, y = get_batch(data_key)
         loss, params, opt_state, batch_stats, losses = train_step(params, X, y, opt_state, batch_stats)
         bar.set_description(f"Loss: {loss:.4g}")
+        writer.add_scalar("training/loss", loss, step)
+        for k, v in losses.items():
+            writer.add_scalar(f"training/loss_{k}", v, step)
 
-        if (step+1) % 500 == 0 or early_stop.should_stop:
+        if (step+1) % 250 == 0 or early_stop.should_stop:
             ckpt = {"params": params, "opt_state": opt_state, "batch_stats": batch_stats, "A": A, "B": B}
             eval_key = jax.random.key(420)
             checkpointer.save(step+1, args=orbax.checkpoint.args.StandardSave(ckpt))
             eval_X, eval_y = get_batch(eval_key)
             predictions = evaluation_step(params, eval_X, eval_y, batch_stats, threshold=0.0)
-            dataset.plot_predictions(eval_key, predictions, ckpt_dir, step+1, title=f"_no_fingerprints")
+            fig = dataset.plot_predictions((eval_X, eval_y), predictions, step+1, writer=writer)
 
             if early_stop.should_stop:
                 break
@@ -432,5 +440,3 @@ if __name__ == "__main__":
         early_stop = early_stop.update(loss)
 
     checkpointer.wait_until_finished()
-
-

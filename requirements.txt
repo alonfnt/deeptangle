@@ -7,4 +7,5 @@ flax
 numba
 optax
 orbax-checkpoint
+tensorboardx
 
