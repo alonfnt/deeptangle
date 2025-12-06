@@ -10,3 +10,13 @@ __pycache__/
 
 # PyPI related files
 *.egg-info
+
+# Checkpoints and model files
+checkpoints/
+checkpoints_*/
+*.npy
+*.pkl
+
+# Datasets
+synthetic_dataset/
+*_dataset/
