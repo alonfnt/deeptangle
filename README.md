@@ -33,37 +33,80 @@ pip install -e .
 ```
 
 ## Train
-To train the model, there are two approaches:
 
-### New Modular Workflow (Recommended for Hugging Face)
-The new workflow separates dataset generation from training:
+### Modern Workflow with Flax NNX (Recommended)
+The new training pipeline uses Flax NNX and supports configuration files:
 
 1. **Generate synthetic dataset:**
-```train
-python3 generate_dataset.py --num_samples=10000 --num_val_samples=1000 --nframes=11 --size=256 --nworms=5,10,50,100,150,200,250 --output_dir=synthetic_dataset
+```bash
+python generate_dataset.py \
+  --num_samples=10000 \
+  --num_val_samples=1000 \
+  --nframes=11 \
+  --size=256 \
+  --nworms=5,10,50,100,150,200,250 \
+  --output_dir=synthetic_dataset
 ```
 
-2. **Train with pre-generated dataset:**
-```train
-python3 train_from_dataset.py --dataset_dir=synthetic_dataset --batch_size=32 --train_steps=100000 --save
+2. **Train with config file (recommended):**
+```bash
+python train.py --config config.yaml
+```
+
+Or train with command-line arguments:
+```bash
+python train.py \
+  --dataset_dir=synthetic_dataset \
+  --batch_size=32 \
+  --train_steps=100000 \
+  --save \
+  --tensorboard_dir=runs
+```
+
+**Features:**
+- Flax NNX models (new Flax API)
+- Configuration file support (YAML)
+- TensorBoard logging for metrics
+- Cleaner checkpoint format
+
+**View training progress:**
+```bash
+tensorboard --logdir runs
 ```
 
 See [WORKFLOW.md](./WORKFLOW.md) for detailed documentation.
 
-### Original On-the-fly Training
-The original training script generates data during training:
-```train
-python3 train.py --batch_size=32 --eval_interval=10 --nworms=100,200 --save
+### Legacy Training Scripts
+
+**Haiku-based on-the-fly training** (original paper implementation):
+```bash
+python train_haiku.py --batch_size=32 --eval_interval=10 --nworms=100,200 --save
 ```
 
-The possible arguments can be seen by using the help flag.
-```train
-python3 train.py --help
+**Flax Linen training** (deprecated, use NNX instead):
+```bash
+python train_from_dataset.py --dataset_dir=synthetic_dataset --batch_size=32 --save
 ```
 
-An example of a training run would be
-```train
-python3 train.py --batch_size=32 --eval_interval=10 --nworms=100,200 --save
+## Inference
+
+Example inference scripts are in the `examples/` directory:
+
+**Detect worms in video:**
+```bash
+python examples/detect_nnx.py \
+  --model=checkpoints/best_model_step_1000 \
+  --input=video.mp4 \
+  --output=detections.png \
+  --frame=12
+```
+
+**Detect worms in image sequence:**
+```bash
+python examples/infer_images.py \
+  --model=checkpoints/best_model_step_1000 \
+  --images="frames/*.png" \
+  --output=result.png
 ```
 
 ## Usage

@@ -1,0 +1,35 @@
+# Training configuration for DeepTangle
+# Use this file with: python train.py --config config.yaml
+
+# Random seed for reproducibility
+seed: 42
+
+# Dataset
+dataset_dir: "synthetic_dataset"
+
+# Training hyperparameters
+batch_size: 32
+learning_rate: 0.001
+train_steps: 100000
+eval_interval: 100
+save_interval: 1000
+
+# Model architecture
+n_suggestions: 8
+latent_dim: 8
+
+# Loss weights
+wloss_w: 1.0
+wloss_s: 100.0
+wloss_p: 100000.0
+
+# Loss parameters
+sigma: 10.0
+cutoff: 48
+
+# Checkpointing
+save: true
+checkpoint_dir: "checkpoints"
+
+# TensorBoard logging
+tensorboard_dir: "runs"

@@ -28,6 +28,8 @@ dependencies = [
     "tqdm",
     "trackpy",
     "jax",
+    "tensorboardX",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
