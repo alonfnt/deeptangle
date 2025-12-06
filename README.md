@@ -35,7 +35,7 @@ pip install -e .
 ## Train
 To train the model, there are two approaches:
 
-### New Modular Workflow (Recommended for HuggingFace)
+### New Modular Workflow (Recommended for Hugging Face)
 The new workflow separates dataset generation from training:
 
 1. **Generate synthetic dataset:**

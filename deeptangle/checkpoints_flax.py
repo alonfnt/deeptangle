@@ -7,6 +7,7 @@ in a format compatible with HuggingFace Hub.
 from pathlib import Path
 from typing import Any
 import json
+import pickle
 
 import jax
 import jax.numpy as jnp
@@ -102,7 +103,6 @@ def save_model_for_inference(
     
     # Save tree structure
     tree_path = output_path / "params_tree.pkl"
-    import pickle
     with tree_path.open('wb') as f:
         pickle.dump(tree_def, f)
     
@@ -149,13 +149,17 @@ def load_model_for_inference(model_dir: str) -> tuple:
     params_path = model_path / "params.npy"
     tree_path = model_path / "params_tree.pkl"
     
-    import pickle
     with tree_path.open('rb') as f:
         tree_def = pickle.load(f)
     
     with params_path.open('rb') as f:
-        num_arrays = len(tree_def.children())
-        flat_params = [jnp.load(f) for _ in range(num_arrays)]
+        # Read arrays based on number of leaves in tree
+        flat_params = []
+        while True:
+            try:
+                flat_params.append(jnp.load(f))
+            except (ValueError, EOFError):
+                break
     
     params = jax.tree_util.tree_unflatten(tree_def, flat_params)
     
@@ -168,8 +172,13 @@ def load_model_for_inference(model_dir: str) -> tuple:
             stats_tree_def = pickle.load(f)
         
         with batch_stats_path.open('rb') as f:
-            num_stats = len(stats_tree_def.children())
-            flat_stats = [jnp.load(f) for _ in range(num_stats)]
+            # Read arrays based on number of leaves in tree
+            flat_stats = []
+            while True:
+                try:
+                    flat_stats.append(jnp.load(f))
+                except (ValueError, EOFError):
+                    break
         
         batch_stats = jax.tree_util.tree_unflatten(stats_tree_def, flat_stats)
     

@@ -153,8 +153,8 @@ def train_step(state, batch_X, batch_y, B, A, size):
         S_pred, H_pred, P_pred = outputs
         
         # Transform predictions to coordinates
-        CM, H = H_pred[..., :2], H_pred[..., 2:]
-        W_pred = points_from_pca(H, A, CM)
+        center_of_mass, pca_coeffs = H_pred[..., :2], H_pred[..., 2:]
+        W_pred = points_from_pca(pca_coeffs, A, center_of_mass)
         
         # Apply sigmoid to scores
         S_pred = jax.nn.sigmoid(S_pred)

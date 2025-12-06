@@ -7,6 +7,7 @@ first step towards making the model compatible with HuggingFace Hub.
 """
 from pathlib import Path
 from functools import partial
+import json
 
 from absl import app, flags
 import jax
@@ -142,8 +143,8 @@ def save_dataset(output_dir, X_train, y_train, X_val, y_val, A, metadata):
     np.save(output_path / "pca_matrix.npy", np.array(A))
     
     # Save metadata
-    import json
-    with open(output_path / "metadata.json", "w") as f:
+    metadata_path = output_path / "metadata.json"
+    with metadata_path.open('w') as f:
         json.dump(metadata, f, indent=2)
     
     print("Dataset saved successfully!")

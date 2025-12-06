@@ -96,7 +96,7 @@ class Detector(nn.Module):
     Main detection network combining CNN backbone and latent space encoder.
     
     This is a Flax version of the original Haiku model, designed to be
-    more compatible with HuggingFace Hub.
+    more compatible with Hugging Face Hub.
     """
     npoints: int
     n_suggestions: int
