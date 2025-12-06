@@ -24,6 +24,8 @@ dependencies = [
     "numba",
     "matplotlib",
     "dm-haiku",
+    "flax",
+    "tqdm",
     "trackpy",
     "jax",
 ]

@@ -33,7 +33,29 @@ pip install -e .
 ```
 
 ## Train
-To train the model, there is a train script used for the model presented in the paper.
+To train the model, there are two approaches:
+
+### New Modular Workflow (Recommended for HuggingFace)
+The new workflow separates dataset generation from training:
+
+1. **Generate synthetic dataset:**
+```train
+python3 generate_dataset.py --num_samples=10000 --num_val_samples=1000 --nframes=11 --size=256 --nworms=5,10,50,100,150,200,250 --output_dir=synthetic_dataset
+```
+
+2. **Train with pre-generated dataset:**
+```train
+python3 train_from_dataset.py --dataset_dir=synthetic_dataset --batch_size=32 --train_steps=100000 --save
+```
+
+See [WORKFLOW.md](./WORKFLOW.md) for detailed documentation.
+
+### Original On-the-fly Training
+The original training script generates data during training:
+```train
+python3 train.py --batch_size=32 --eval_interval=10 --nworms=100,200 --save
+```
+
 The possible arguments can be seen by using the help flag.
 ```train
 python3 train.py --help

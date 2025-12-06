@@ -21,7 +21,7 @@ import optax
 from deeptangle.dataset.loader import SyntheticDatasetLoader, load_pca_matrix, load_metadata
 from deeptangle.dataset.pca import points_from_pca
 from deeptangle.model_flax import create_detector
-from deeptangle import logger
+from deeptangle import logger, checkpoints_flax
 
 Losses = namedtuple("Losses", ["w", "s", "p"])
 
@@ -273,13 +273,42 @@ def main(argv):
             # Save if best
             if FLAGS.save and loss_val < best_loss:
                 best_loss = loss_val
-                print(f"  -> Saving checkpoint (new best: {best_loss:.4f})")
-                # TODO: Implement checkpoint saving for Flax
+                print(f"  -> Saving best checkpoint (loss: {best_loss:.4f})")
+                checkpoints_flax.save_checkpoint(
+                    checkpoint_dir=FLAGS.checkpoint_dir,
+                    state=state,
+                    step=step + 1,
+                    keep=3,
+                    overwrite=False
+                )
+                # Also save in inference format
+                model_metadata = {
+                    "nframes": nframes,
+                    "size": size,
+                    "npca": npca,
+                    "n_suggestions": FLAGS.n_suggestions,
+                    "latent_dim": FLAGS.latent_dim,
+                    "step": step + 1,
+                    "loss": loss_val,
+                }
+                checkpoints_flax.save_model_for_inference(
+                    output_dir=str(checkpoint_dir / "best_model"),
+                    params=state.params,
+                    batch_stats=state.batch_stats,
+                    pca_matrix=A,
+                    metadata=model_metadata
+                )
         
         # Periodic save
         if FLAGS.save and (step + 1) % FLAGS.save_interval == 0:
             print(f"  -> Saving periodic checkpoint at step {step + 1}")
-            # TODO: Implement checkpoint saving for Flax
+            checkpoints_flax.save_checkpoint(
+                checkpoint_dir=FLAGS.checkpoint_dir,
+                state=state,
+                step=step + 1,
+                keep=3,
+                overwrite=False
+            )
     
     print("\n" + "=" * 60)
     print("Training complete!")
