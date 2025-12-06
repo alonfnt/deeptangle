@@ -1,8 +1,4 @@
-"""
-Training script with Flax NNX models, config file support, and TensorBoard logging.
-
-This script uses pre-generated synthetic datasets and the new Flax NNX API.
-"""
+"""Training script with config file support and TensorBoard logging."""
 from collections import namedtuple
 from pathlib import Path
 import yaml
@@ -19,7 +15,7 @@ from tensorboardX import SummaryWriter
 
 from deeptangle.dataset.loader import SyntheticDatasetLoader, load_pca_matrix, load_metadata
 from deeptangle.dataset.pca import points_from_pca
-from deeptangle.model_nnx import create_detector
+from deeptangle.model import create_detector
 from deeptangle import logger
 
 Losses = namedtuple("Losses", ["w", "s", "p"])

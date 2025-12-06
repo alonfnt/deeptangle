@@ -1,86 +1,236 @@
-from typing import Optional, Sequence
+"""
+DeepTangle model using Flax NNX.
 
-import haiku as hk
-from haiku._src.nets.resnet import BlockGroup
+Implements ResNet-based worm detection with latent space encoding.
+"""
+from typing import Sequence
+from flax import nnx
 import jax
 import jax.numpy as jnp
 
 
-class Detector(hk.Module):
-    """
-    Composed Neural Netork of CNN backbone and latent space encoder.
-    """
+class ResNetBlock(nnx.Module):
+    """Basic ResNet block."""
+    
+    def __init__(self, in_channels: int, channels: int, stride: int = 1, *, rngs: nnx.Rngs):
+        self.channels = channels
+        self.stride = stride
+        self.in_channels = in_channels
+        
+        # First conv path
+        self.conv1 = nnx.Conv(
+            in_channels, channels, kernel_size=(3, 3),
+            strides=(stride, stride), padding='SAME',
+            use_bias=False, rngs=rngs
+        )
+        self.bn1 = nnx.BatchNorm(channels, rngs=rngs)
+        
+        # Second conv path
+        self.conv2 = nnx.Conv(
+            channels, channels, kernel_size=(3, 3),
+            padding='SAME', use_bias=False, rngs=rngs
+        )
+        self.bn2 = nnx.BatchNorm(channels, rngs=rngs)
+        
+        # Projection for residual if needed
+        self.needs_projection = (stride != 1 or in_channels != channels)
+        if self.needs_projection:
+            self.proj_conv = nnx.Conv(
+                in_channels, channels, kernel_size=(1, 1),
+                strides=(stride, stride), use_bias=False, rngs=rngs
+            )
+            self.proj_bn = nnx.BatchNorm(channels, rngs=rngs)
+        else:
+            self.proj_conv = None
+            self.proj_bn = None
+    
+    def __call__(self, x, *, train: bool = True):
+        residual = x
+        
+        # First conv
+        y = self.conv1(x)
+        y = self.bn1(y, use_running_average=not train)
+        y = nnx.relu(y)
+        
+        # Second conv
+        y = self.conv2(y)
+        y = self.bn2(y, use_running_average=not train)
+        
+        # Adjust residual dimensions if needed
+        if self.needs_projection:
+            residual = self.proj_conv(x)
+            residual = self.proj_bn(residual, use_running_average=not train)
+        
+        return nnx.relu(y + residual)
 
+
+class ResNet(nnx.Module):
+    """ResNet backbone for feature extraction."""
+    
+    def __init__(
+        self,
+        in_channels: int,
+        init_channels: int = 64,
+        blocks_per_group: Sequence[int] = (2, 4, 4, 2),
+        channels_per_group: Sequence[int] = (64, 128, 256, 512),
+        strides: Sequence[int] = (1, 2, 1, 2),
+        *,
+        rngs: nnx.Rngs
+    ):
+        self.init_conv = nnx.Conv(
+            in_channels, init_channels, kernel_size=(7, 7),
+            strides=(2, 2), padding='SAME', use_bias=False, rngs=rngs
+        )
+        self.init_bn = nnx.BatchNorm(init_channels, rngs=rngs)
+        
+        # Create ResNet blocks
+        self.block_groups = nnx.List([])
+        current_channels = init_channels
+        for i, (num_blocks, channels, stride) in enumerate(zip(
+            blocks_per_group, channels_per_group, strides
+        )):
+            blocks = []
+            for j in range(num_blocks):
+                block_stride = stride if j == 0 else 1
+                block_in_channels = current_channels if j == 0 else channels
+                blocks.append(ResNetBlock(block_in_channels, channels, stride=block_stride, rngs=rngs))
+                current_channels = channels
+            self.block_groups.append(nnx.List(blocks))
+    
+    def __call__(self, x, *, train: bool = True):
+        # Initial conv
+        x = self.init_conv(x)
+        x = self.init_bn(x, use_running_average=not train)
+        x = nnx.relu(x)
+        x = nnx.avg_pool(x, window_shape=(3, 3), strides=(2, 2), padding='SAME')
+        
+        # ResNet blocks
+        for blocks in self.block_groups:
+            for block in blocks:
+                x = block(x, train=train)
+        
+        return x
+
+
+class LatentSpaceEncoder(nnx.Module):
+    """Latent space encoder with orientational invariance."""
+    
+    def __init__(self, latent_dim: int, input_dim: int, *, rngs: nnx.Rngs):
+        self.latent_dim = latent_dim
+        self.fc1 = nnx.Linear(input_dim, 128, rngs=rngs)
+        self.bn = nnx.BatchNorm(128, rngs=rngs)
+        self.fc2 = nnx.Linear(128, latent_dim, rngs=rngs)
+    
+    def __call__(self, x, B, *, train: bool = True):
+        # Stop gradients as in original implementation
+        x = jax.lax.stop_gradient(x)
+        
+        # Create flipped version
+        xf = x.at[..., 2:].set(jnp.matmul(x[..., 2:], B))
+        
+        # Process both versions
+        x_flat = x.reshape(*x.shape[:2], -1)
+        xf_flat = xf.reshape(*xf.shape[:2], -1)
+        
+        p = nnx.relu(self.fc1(x_flat))
+        pf = nnx.relu(self.fc1(xf_flat))
+        
+        # Combine and batch norm
+        p = self.bn(p + pf, use_running_average=not train)
+        p = self.fc2(p)
+        
+        return p
+
+
+class Detector(nnx.Module):
+    """
+    Main detection network combining CNN backbone and latent space encoder.
+    
+    This uses Flax NNX for better Hugging Face Hub compatibility.
+    """
+    
     def __init__(
         self,
         npoints: int,
-        n_suggestion_per_feature: int,
-        latent_space_dim: int,
+        n_suggestions: int,
+        latent_dim: int,
         nframes: int = 11,
-        name: Optional[str] = None,
+        *,
+        rngs: nnx.Rngs
     ):
-        super().__init__(name=name)
+        self.npoints = npoints
+        self.n_suggestions = n_suggestions
+        self.latent_dim = latent_dim
+        self.nframes = nframes
+        
         self.neigen = npoints
         self.temporal_window = 3
-        self.npoints = self.temporal_window * (npoints + 2) + 1  # (pca values + CM) + score
-        self.n_suggestion = n_suggestion_per_feature
-        self.offset = None
-
-        bn_config = {"decay_rate": 0.9, "eps": 1e-5, "create_scale": True, "create_offset": True}
-
+        self.npoints_output = self.temporal_window * (npoints + 2) + 1
+        
         # Feature extraction
         init_channels = 64 + sum([nframes // 5 * 2**i for i in range(6)])
         self.backbone = ResNet(
-            blocks_per_group=(2, 4, 4, 2), bottleneck=False, init_channels=init_channels
+            in_channels=nframes,  # Number of time frames
+            init_channels=init_channels,
+            blocks_per_group=(2, 4, 4, 2),
+            channels_per_group=(64, 128, 256, 512),
+            strides=(1, 2, 1, 2),
+            rngs=rngs
         )
-
-        # Layers to predict positions
-        self.fc_w1 = hk.Linear(512)
-        self.bn_w1 = hk.BatchNorm(**bn_config)
-        self.fc_w2 = hk.Linear(self.n_suggestion * self.npoints)
-
-        # Layers to predict latent space (Dimensionality reduction)
-        self.encoder = LatentSpaceEncoder(latent_space_dim, name="LS_encoder")
-
-    def __call__(self, D, is_training, B):
-        batch_size, height, width, _ = D.shape
-
-        z = self.backbone(D, is_training)
-
-        # Predicting positions (eigenvalues)
-        w = jax.nn.relu(self.fc_w1(z))
-        w = self.bn_w1(w, is_training)
+        
+        # Position prediction layers
+        # Input dimension from backbone will be channels_per_group[-1]
+        self.fc_w1 = nnx.Linear(512, 512, rngs=rngs)  # Last channel group is 512
+        self.bn_w = nnx.BatchNorm(512, rngs=rngs)
+        self.fc_w2 = nnx.Linear(512, n_suggestions * self.npoints_output, rngs=rngs)
+        
+        # Latent space encoder
+        # Input dimension is temporal_window * (2 + npoints)
+        encoder_input_dim = self.temporal_window * (2 + npoints)
+        self.encoder = LatentSpaceEncoder(latent_dim, encoder_input_dim, rngs=rngs)
+    
+    def __call__(self, D, B, *, train: bool = True):
+        batch_size, height, width, channels = D.shape
+        
+        # Extract features
+        z = self.backbone(D, train=train)
+        
+        # Predict positions (eigenvalues + center of mass + score)
+        w = nnx.relu(self.fc_w1(z))
+        w = self.bn_w(w, use_running_average=not train)
         w = self.fc_w2(w)
-
-        nrows = w.shape[1]
-        ncols = w.shape[2]
-        w = w.reshape(batch_size, nrows, ncols, self.n_suggestion, self.npoints)
-
-        if self.offset is None:
-            s_y = (height / nrows / 2) + jnp.arange(0, height, height / nrows)
-            s_x = width / ncols / 2 + jnp.arange(0, width, width / ncols)
-            self.offset = jnp.stack(jnp.meshgrid(s_x, s_y), axis=-1)
-
-        # Separate the score prediction from the positional
+        
+        nrows, ncols = w.shape[1], w.shape[2]
+        w = w.reshape(batch_size, nrows, ncols, self.n_suggestions, self.npoints_output)
+        
+        # Create offset grid for converting grid positions to pixel positions
+        s_y = (height / nrows / 2) + jnp.arange(0, height, height / nrows)
+        s_x = width / ncols / 2 + jnp.arange(0, width, width / ncols)
+        offset = jnp.stack(jnp.meshgrid(s_x, s_y), axis=-1)
+        
+        # Separate score prediction from positional
         w, s = w[..., :-1], w[..., -1]
-
-        # Split npoints to tw predictions (past-present-future)
+        
+        # Reshape to temporal window format
         w = w.reshape(*w.shape[:-1], self.temporal_window, 2 + self.neigen)
-        w = self.add_offset(w)
-
+        
+        # Add offset to convert grid positions to pixel coordinates
+        w = w.at[..., (0, 1)].add(offset[None, ..., None, None, :])
+        
         # Flatten the prediction from grid to 1D
         w = w.reshape(batch_size, -1, self.temporal_window, 2 + self.neigen)
         s = s.reshape(batch_size, -1)
-
-        # Predict latent space from the positions (only see the temporal self, not other predictions)
+        
+        # Align eigenvalues (handle flipping)
         w = self.align_eigenvalues(w, B)
-        p = self.encoder(w, B, is_training=is_training)
+        
+        # Predict latent space
+        p = self.encoder(w, B, train=train)
+        
         return s, w, p
-
-    def add_offset(self, x):
-        return x.at[..., (0, 1)].add(self.offset[None, ..., None, None, :])  # pyright: ignore
-
+    
     def align_eigenvalues(self, x, B):
+        """Align eigenvalues to handle head-tail ambiguity."""
         w = x[..., 2:]
         wf = jnp.matmul(w, B)
         dist_keep = jnp.mean((w[..., 1:2, :] - w) ** 2, axis=-1, keepdims=True)
@@ -90,76 +240,31 @@ class Detector(hk.Module):
         return x
 
 
-class LatentSpaceEncoder(hk.Module):
+def create_detector(
+    npoints: int,
+    n_suggestions: int,
+    latent_dim: int,
+    nframes: int = 11,
+    *,
+    rngs: nnx.Rngs
+) -> Detector:
     """
-    Orientational invariant latent space encoder.
+    Create a Detector model using Flax NNX.
+    
+    Args:
+        npoints: Number of PCA components.
+        n_suggestions: Number of suggestions per grid cell.
+        latent_dim: Dimension of latent space.
+        nframes: Number of frames in input clip.
+        rngs: Random number generators for initialization.
+        
+    Returns:
+        A Detector model instance.
     """
-
-    def __init__(self, latent_dim: int, name: Optional[str] = None):
-        super().__init__(name)
-
-        bn_config = {"decay_rate": 0.9, "eps": 1e-5, "create_scale": True, "create_offset": True}
-        self.fc_p1 = hk.Linear(128)
-        self.bn_p1 = hk.BatchNorm(**bn_config)
-        self.fc_p2 = hk.Linear(latent_dim)
-
-    def __call__(self, x, B, is_training):
-        x = jax.lax.stop_gradient(x)
-        xf = x.at[..., 2:].set(jnp.matmul(x[..., 2:], B))
-
-        p = jax.nn.relu(self.fc_p1(x.reshape(*x.shape[:2], -1)))
-        pf = jax.nn.relu(self.fc_p1(xf.reshape(*x.shape[:2], -1)))
-        p = self.bn_p1(p + pf, is_training)
-        p = self.fc_p2(p)
-        return p
-
-
-class ResNet(hk.Module):
-    """
-    ResNet Network with average pooling instead of max-pooling.
-
-    Code based on:
-    https://github.com/deepmind/dm-haiku/blob/main/haiku/_src/nets/resnet.py
-    """
-
-    def __init__(
-        self,
-        blocks_per_group: Sequence[int],
-        bottleneck: bool = True,
-        channels_per_group: Sequence[int] = (64, 128, 256, 512),
-        use_projection: Sequence[bool] = (True, True, True, True),
-        name: Optional[str] = None,
-        strides: Sequence[int] = (1, 2, 1, 2),
-        init_channels: int = 64,
-    ):
-        super().__init__(name=name)
-
-        bn_config = {"decay_rate": 0.9, "eps": 1e-5, "create_scale": True, "create_offset": True}
-
-        self.initial_conv = hk.Conv2D(init_channels, 7, stride=2, with_bias=False)
-        self.initial_batchnorm = hk.BatchNorm(name="initial_batchnorm", **bn_config)
-
-        self.block_groups = []
-        for i, stride in enumerate(strides):
-            self.block_groups.append(
-                BlockGroup(
-                    channels=channels_per_group[i],
-                    num_blocks=blocks_per_group[i],
-                    stride=stride,
-                    bn_config=bn_config,
-                    resnet_v2=False,
-                    bottleneck=bottleneck,
-                    use_projection=use_projection[i],
-                    name="block_group_%d" % (i),
-                )
-            )
-
-    def __call__(self, inputs, is_training):
-        out = self.initial_conv(inputs)
-        out = self.initial_batchnorm(out, is_training)
-        out = jax.nn.relu(out)
-        out = hk.avg_pool(out, window_shape=(1, 3, 3, 1), strides=(1, 2, 2, 1), padding="SAME")
-
-        for block_group in self.block_groups:
-            out = block_group(out, is_training, test_local_stats=False)
-        return out
+    return Detector(
+        npoints=npoints,
+        n_suggestions=n_suggestions,
+        latent_dim=latent_dim,
+        nframes=nframes,
+        rngs=rngs
+    )

@@ -1,9 +1,4 @@
-"""
-Simple inference example for DeepTangle NNX model on image sequences.
-
-This script shows how to perform inference on a sequence of images
-(e.g., PNG files from microscopy).
-"""
+"""Detect worms in image sequences."""
 from pathlib import Path
 import json
 
@@ -16,7 +11,7 @@ import numpy as np
 from skimage import io as skio
 from skimage.exposure import equalize_adapthist
 
-from deeptangle.model_nnx import create_detector
+from deeptangle.model import create_detector
 from deeptangle.dataset.pca import points_from_pca
 
 

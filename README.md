@@ -34,10 +34,9 @@ pip install -e .
 
 ## Train
 
-### Modern Workflow with Flax NNX (Recommended)
-The new training pipeline uses Flax NNX and supports configuration files:
+### Workflow
 
-1. **Generate synthetic dataset:**
+1. **Generate dataset:**
 ```bash
 python generate_dataset.py \
   --num_samples=10000 \
@@ -45,56 +44,33 @@ python generate_dataset.py \
   --nframes=11 \
   --size=256 \
   --nworms=5,10,50,100,150,200,250 \
-  --output_dir=synthetic_dataset
+  --output_dir=dataset
 ```
 
-2. **Train with config file (recommended):**
+2. **Train (with config file):**
 ```bash
 python train.py --config config.yaml
 ```
 
-Or train with command-line arguments:
+Or with command-line arguments:
 ```bash
 python train.py \
-  --dataset_dir=synthetic_dataset \
+  --dataset_dir=dataset \
   --batch_size=32 \
   --train_steps=100000 \
-  --save \
-  --tensorboard_dir=runs
+  --save
 ```
 
-**Features:**
-- Flax NNX models (new Flax API)
-- Configuration file support (YAML)
-- TensorBoard logging for metrics
-- Cleaner checkpoint format
-
-**View training progress:**
+3. **Monitor training:**
 ```bash
 tensorboard --logdir runs
 ```
 
-See [WORKFLOW.md](./WORKFLOW.md) for detailed documentation.
-
-### Legacy Training Scripts
-
-**Haiku-based on-the-fly training** (original paper implementation):
-```bash
-python train_haiku.py --batch_size=32 --eval_interval=10 --nworms=100,200 --save
-```
-
-**Flax Linen training** (deprecated, use NNX instead):
-```bash
-python train_from_dataset.py --dataset_dir=synthetic_dataset --batch_size=32 --save
-```
-
 ## Inference
-
-Example inference scripts are in the `examples/` directory:
 
 **Detect worms in video:**
 ```bash
-python examples/detect_nnx.py \
+python examples/detect.py \
   --model=checkpoints/best_model_step_1000 \
   --input=video.mp4 \
   --output=detections.png \
@@ -103,7 +79,7 @@ python examples/detect_nnx.py \
 
 **Detect worms in image sequence:**
 ```bash
-python examples/infer_images.py \
+python examples/infer.py \
   --model=checkpoints/best_model_step_1000 \
   --images="frames/*.png" \
   --output=result.png
