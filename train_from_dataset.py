@@ -245,7 +245,7 @@ def main(argv):
     print("=" * 60)
     
     # Create checkpoint directory
-    checkpoint_dir = Path(FLAGS.checkpoint_dir)
+    checkpoint_dir = Path(FLAGS.checkpoint_dir).absolute()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
     # Training loop
@@ -275,7 +275,7 @@ def main(argv):
                 best_loss = loss_val
                 print(f"  -> Saving best checkpoint (loss: {best_loss:.4f})")
                 checkpoints_flax.save_checkpoint(
-                    checkpoint_dir=FLAGS.checkpoint_dir,
+                    checkpoint_dir=str(checkpoint_dir),
                     state=state,
                     step=step + 1,
                     keep=3,
@@ -303,7 +303,7 @@ def main(argv):
         if FLAGS.save and (step + 1) % FLAGS.save_interval == 0:
             print(f"  -> Saving periodic checkpoint at step {step + 1}")
             checkpoints_flax.save_checkpoint(
-                checkpoint_dir=FLAGS.checkpoint_dir,
+                checkpoint_dir=str(checkpoint_dir),
                 state=state,
                 step=step + 1,
                 keep=3,

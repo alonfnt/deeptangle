@@ -32,7 +32,7 @@ def save_checkpoint(
         keep: Number of checkpoints to keep.
         overwrite: Whether to overwrite existing checkpoint.
     """
-    checkpoint_path = Path(checkpoint_dir)
+    checkpoint_path = Path(checkpoint_dir).absolute()
     checkpoint_path.mkdir(parents=True, exist_ok=True)
     
     flax_checkpoints.save_checkpoint(

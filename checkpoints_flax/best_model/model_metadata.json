@@ -1,0 +1,9 @@
+{
+  "nframes": 11,
+  "size": 128,
+  "npca": 12,
+  "n_suggestions": 8,
+  "latent_dim": 8,
+  "step": 2,
+  "loss": 223.96356201171875
+}
