@@ -68,6 +68,10 @@ tensorboard --logdir runs
 
 ## Inference
 
+Inference examples automatically detect and support both model formats:
+- **NNX models**: New models trained with `train.py`
+- **Haiku models**: Pre-trained weights from the paper
+
 **Detect worms in video:**
 ```bash
 python examples/detect.py \
@@ -83,6 +87,18 @@ python examples/infer.py \
   --model=checkpoints/best_model_step_1000 \
   --images="frames/*.png" \
   --output=result.png
+```
+
+**Using pre-trained weights from the paper:**
+
+The pre-trained Haiku weights can be used directly for inference:
+```bash
+# Download weights
+wget https://sid.erda.dk/share_redirect/cEjIpG1yQl -O weights.zip
+unzip weights.zip
+
+# Run inference (automatically detects Haiku format)
+python examples/detect.py --model=ckpt --input=video.mp4 --output=out.png
 ```
 
 ## Usage

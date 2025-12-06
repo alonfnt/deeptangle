@@ -10,11 +10,14 @@ from .predict import (
 )
 from .tracking import identity_assignment, merge_tracks
 from .logger import time_activity
+from .inference import load_model as load_model_auto, detect_model_format
 
 __all__ = [
     "build_model",
     "detect",
     "load_model",
+    "load_model_auto",
+    "detect_model_format",
     "Predictions",
     "predict",
     "non_max_suppression",

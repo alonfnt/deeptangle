@@ -1,9 +1,8 @@
-"""Detect worms in video files."""
+"""Detect worms in video files - supports both Haiku and NNX models."""
 from pathlib import Path
-import json
 
 from absl import app, flags
-from flax import nnx
+import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,7 +14,7 @@ np.float = np.float64
 np.int = np.int_
 import skvideo.io
 
-from deeptangle.model import create_detector
+from deeptangle.inference import load_model, detect_model_format
 from deeptangle.dataset.pca import points_from_pca
 from deeptangle import time_activity
 
@@ -29,39 +28,6 @@ flags.DEFINE_integer("frame", default=5, help="Target frame to detect")
 FLAGS = flags.FLAGS
 
 
-def load_nnx_model(model_dir: str):
-    """Load a trained NNX model from checkpoint."""
-    model_path = Path(model_dir)
-    
-    # Load metadata
-    with open(model_path / "metadata.json", "r") as f:
-        metadata = json.load(f)
-    
-    # Load PCA matrix
-    pca_matrix = jnp.array(np.load(model_path / "pca_matrix.npy"))
-    
-    # Create model with same architecture
-    rngs = nnx.Rngs(0)  # Seed doesn't matter for inference
-    model = create_detector(
-        npoints=metadata["npca"],
-        n_suggestions=metadata["n_suggestions"],
-        latent_dim=metadata["latent_dim"],
-        nframes=metadata["nframes"],
-        rngs=rngs
-    )
-    
-    # Load model weights
-    with open(model_path / "model.nnx", "rb") as f:
-        model = nnx.from_bytes(model, f.read())
-    
-    # Compute B matrix for alignment
-    kpoints2 = pca_matrix.shape[1]
-    J = jnp.flip(jnp.identity(kpoints2), axis=1)
-    B = pca_matrix @ J @ jnp.transpose(pca_matrix)
-    
-    return model, pca_matrix, B, metadata
-
-
 def preprocess_clip(clip, correction_factor=1.0):
     """Preprocess video clip for inference."""
     # Invert colors
@@ -73,8 +39,29 @@ def preprocess_clip(clip, correction_factor=1.0):
     return clip
 
 
-def detect_worms(model, clip, pca_matrix, B, score_threshold=0.5):
-    """Run detection on a clip."""
+def detect_with_haiku(forward_fn, state, clip, score_threshold=0.5):
+    """Run detection with Haiku model."""
+    # Haiku models expect batch dimension
+    if clip.ndim == 3:
+        clip = clip[None, ...]
+    
+    # Run inference
+    predictions, _ = forward_fn.apply(state[0], state[1], clip, False)
+    
+    # Filter by score threshold
+    mask = predictions.s[0] > score_threshold
+    w_filtered = predictions.w[0, mask]
+    s_filtered = predictions.s[0, mask]
+    
+    return w_filtered, s_filtered
+
+
+def detect_with_nnx(model, clip, pca_matrix, B, score_threshold=0.5):
+    """Run detection with NNX model."""
+    # Ensure batch dimension
+    if clip.ndim == 3:
+        clip = clip[None, ...]
+    
     # Transpose to (B, H, W, T) format
     inputs = jnp.transpose(clip, axes=(0, 2, 3, 1))
     
@@ -90,16 +77,22 @@ def detect_worms(model, clip, pca_matrix, B, score_threshold=0.5):
     mask = S_pred[0] > score_threshold
     w_filtered = W_pred[0, mask]
     s_filtered = S_pred[0, mask]
-    
-    return w_filtered, s_filtered
 
 
 def main(args):
     del args
     
-    with time_activity("Loading NNX Model"):
-        model, pca_matrix, B, metadata = load_nnx_model(FLAGS.model)
-        print(f"Loaded model from {FLAGS.model}")
+    with time_activity("Loading Model"):
+        model_format = detect_model_format(FLAGS.model)
+        print(f"Detected {model_format.upper()} model format")
+        
+        model_data = load_model(FLAGS.model)
+        
+        if model_format == "haiku":
+            forward_fn, state, pca_matrix, metadata = model_data
+        else:  # nnx
+            model, pca_matrix, B, metadata = model_data
+        
         print(f"Model expects {metadata['nframes']} frames")
     
     with time_activity("Reading input clip from video file"):
@@ -110,21 +103,23 @@ def main(args):
     
     with time_activity("Pre-processing the clip"):
         clip = preprocess_clip(clip, FLAGS.correction_factor)
-        clip = clip[None, ...]  # Add batch dimension
     
     with time_activity("Detecting worms"):
-        worms, scores = detect_worms(model, clip, pca_matrix, B, FLAGS.score_threshold)
+        if model_format == "haiku":
+            worms, scores = detect_with_haiku(forward_fn, state, clip, FLAGS.score_threshold)
+        else:  # nnx
+            worms, scores = detect_with_nnx(model, clip, pca_matrix, B, FLAGS.score_threshold)
         print(f"Detected {len(worms)} worms")
     
     with time_activity("Plotting results"):
         plt.style.use("fast")
         plt.figure(figsize=(10, 10))
-        plt.xlim(0, clip.shape[3])
-        plt.ylim(0, clip.shape[2])
+        plt.xlim(0, clip.shape[1])
+        plt.ylim(0, clip.shape[0])
         
         # Show middle frame
         mid_frame = metadata['nframes'] // 2
-        plt.imshow(clip[0, mid_frame], cmap="binary")
+        plt.imshow(clip[mid_frame], cmap="binary")
         
         # Plot detected worms
         for worm in worms:
@@ -132,10 +127,9 @@ def main(args):
             skeleton = worm[1]  # temporal_window=3, so index 1 is middle
             plt.plot(skeleton[:, 0], skeleton[:, 1], "-", linewidth=2, alpha=0.8)
         
-        plt.title(f"Detected {len(worms)} worms (frame {FLAGS.frame})")
+        plt.title(f"Detected {len(worms)} worms (frame {FLAGS.frame}, {model_format.upper()} model)")
         plt.savefig(FLAGS.output, dpi=300, bbox_inches='tight')
         print(f"Saved output to {FLAGS.output}")
-
 
 if __name__ == "__main__":
     app.run(main)
